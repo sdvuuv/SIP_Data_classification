@@ -234,7 +234,8 @@ def get_main_map_data(study_date: datetime):
             continue 
                 
         trajectory_line = LineString(sips_coords[:, ::-1])
-            
+        #TODO сделать функцию проверки пересечения на сфере   
+        #TODO сохранянять данные о времени, и сохранять данные о точках пересечения траекторий sip-ов и полигона
         if trajectory_line.intersects(anomaly_polygon_shapely):
             print(f"    -> Найдено пересечение: станция {site['id']}, спутник {sat_id}")
             unique_id = f"{site['id']}-{sat_id}"
