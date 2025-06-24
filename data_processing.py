@@ -12,6 +12,8 @@ import gzip
 import shutil
 from coordinates import satellite_xyz
 from numpy.typing import NDArray
+import s2geometry as s2
+
 
 if not tempdir:
     tempdir = "./"
@@ -71,9 +73,9 @@ RE = 6378000.0
 
 
 nav_file_cache = {} 
-
 xyz_cache = {}
 trajectory_details_cache = {}
+
 def get_sat_xyz(
     nav_file: Path, 
     start: datetime, 
@@ -280,49 +282,112 @@ def generate_equatorial_poly():
     correct_polygon_coords = path4 + path3 + path2 + path1
     return correct_polygon_coords
 
+def _coords_to_s2latlng_points(coords: list[tuple]) -> list[s2.S2LatLng]:
+    """Вспомогательная функция для конвертации списка (lon, lat) в точки S2."""
+    return [s2.S2LatLng.FromDegrees(lat, lon) for lon, lat in coords]
+
+def _count_polyline_polygon_intersections(polyline: s2.S2Polyline, polygon: s2.S2Polygon) -> int:
+    """
+    Считает количество уникальных точек пересечения полилинии с границами полигона.
+    """
+    intersection_points = set()
+    
+    # Итерируемся по каждой грани полигона
+    for i in range(polygon.num_loops()):
+        loop = polygon.loop(i)
+        for j in range(loop.num_vertices()):
+            edge = loop.edge(j) # Получаем ребро полигона (отрезок)
+            
+            # Итерируемся по каждому сегменту полилинии
+            for k in range(polyline.num_vertices() - 1):
+                polyline_segment_start = polyline.vertex(k)
+                polyline_segment_end = polyline.vertex(k+1)
+                
+                # Создаем S2Polyline из одного сегмента для проверки пересечения
+                segment_polyline = s2.S2Polyline([polyline_segment_start, polyline_segment_end])
+                
+                # Проверяем, пересекает ли сегмент ребро
+                # S2CrossingEdgeQuery не так прост в использовании,
+                # поэтому используем более простой, но эффективный подход:
+                # Проверим, пересекается ли ребро с полилинией.
+                # Для более точного подсчета точек нужен более сложный алгоритм,
+                # но для подсчета количества пересечений достаточно этого.
+                
+                crosser = s2.S2EdgeCrosser(polyline_segment_start, polyline_segment_end, edge.v0)
+                if crosser.crossing_sign(edge.v1) >= 0: # 0 = на ребре, 1 = пересекает
+                    # Просто фиксируем факт пересечения для этого ребра
+                    # Для простоты считаем, что одно пересечение на ребро.
+                    # Это упрощение, но для задачи "2 или больше" оно подходит.
+                    intersection_points.add(j) # Добавляем индекс ребра, чтобы не считать дубликаты
+    
+    return len(intersection_points)
+
+# --- ПЕРЕПИСАННАЯ ФУНКЦИЯ со всеми исправлениями ---
 def get_main_map_data(study_date: datetime):
 
     anomaly_polygon_coords = generate_equatorial_poly()
-    anomaly_polygon_shapely = Polygon(anomaly_polygon_coords)
-    effective_radius_km = 1000
 
+    # --- S2: Создание сферического полигона ---
+    s2_latlng_points = [s2.S2LatLng.FromDegrees(lat, lon) for lon, lat in anomaly_polygon_coords]
+    s2_points = [point.ToPoint() for point in s2_latlng_points]
+    s2_loop = s2.S2Loop(s2_points)
+    anomaly_polygon_s2 = s2.S2Polygon(s2_loop)
+    
+    # --- Логика получения данных ---
     site_id="msku"
     site = get_site_data_by_id(site_id)
+    if not site:
+        print(f"Не удалось получить данные для станции {site_id}")
+        return []
+        
     nav_file = load_nav_file(study_date)
     end_time = study_date + timedelta(days=1, seconds=-30)
 
-    all_sats_xyz, times = get_sat_xyz(nav_file, study_date, end_time) 
-
-    final_trajectories = []
-
-    site_point = Point(int(site['lon']), int(site['lat']))
-    
-    if  not(anomaly_polygon_shapely.contains(site_point) or site_point.distance(anomaly_polygon_shapely) * 111 < effective_radius_km):
-        return 0
-            
-    print("Станция подошла") 
+    all_sats_xyz, times = get_sat_xyz(nav_file, study_date, end_time)
     sats_elaz = get_elaz_for_site(site['xyz'], all_sats_xyz)
     site_sips = get_sips_for_site((site['lat'], site['lon']), sats_elaz)
-
+    
+    
+    final_trajectories = []
+    
     for sat_id, sips_coords in site_sips.items():
         if len(sips_coords) < 2:
-            continue 
-                
-        trajectory_line = LineString(sips_coords[:, ::-1])
-        points_with_time = get_trajectory_details(study_date, site_id, sat_id)['points']
-        trajectory_segments = split_trajectory_by_gaps(points_with_time)
-        if trajectory_line.intersects(anomaly_polygon_shapely):
-            print(f"    -> Найдено пересечение: станция {site['id']}, спутник {sat_id}")
-            trajectory_data = {
-                    'id': f"{site['id']}-{sat_id}",
-                    'segments': trajectory_segments,
-                    'station_id': site['id'],
-                    'satellite_id': sat_id
-                }
-            final_trajectories.append(trajectory_data)
+            continue
+        
+        trajectory_points_s2 = [s2.S2LatLng.FromDegrees(p[0], p[1]) for p in sips_coords]
+        trajectory_polyline_s2 = s2.S2Polyline(trajectory_points_s2)
+        
+        if anomaly_polygon_s2.IntersectWithPolyline(trajectory_polyline_s2):
+            crossings = 0
+            for i in range(trajectory_polyline_s2.num_vertices() - 1):
+                v0 = trajectory_polyline_s2.vertex(i)
+                v1 = trajectory_polyline_s2.vertex(i + 1)
+                segment_as_latlng = [s2.S2LatLng(v0), s2.S2LatLng(v1)]
+                if anomaly_polygon_s2.IntersectWithPolyline(s2.S2Polyline(segment_as_latlng)):
+                    if not anomaly_polygon_s2.Contains(v0):
+                         crossings += 1
 
-    return final_trajectories 
-   
+            if crossings >= 1:
+                print(f"    ✅ Траектория {site['id']}-{sat_id} подходит. Получаем детали...")
+                
+                # --- НОВАЯ ЛОГИКА ---
+                # Получаем детальные данные (с временными метками)
+                detailed_trajectory = get_trajectory_details(study_date, site['id'], sat_id)
+                
+                if detailed_trajectory and detailed_trajectory['points']:
+                    # Разбиваем детальную траекторию на непрерывные сегменты
+                    segments = split_trajectory_by_gaps(detailed_trajectory['points'])
+                    
+                    # Сохраняем траекторию с сегментами
+                    trajectory_data = {
+                        'id': detailed_trajectory['id'],
+                        'station_id': site['id'],
+                        'segments': segments # <-- Теперь у нас есть ключ 'segments'
+                    }
+                    final_trajectories.append(trajectory_data)
+
+    return final_trajectories
+
 def get_trajectory_details(
     study_date: datetime,
     station_id: str,

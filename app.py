@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 import data_processing
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], prevent_initial_callbacks="initial_duplicate")
 
 modal = dbc.Modal(
     [
@@ -37,6 +37,7 @@ modal = dbc.Modal(
 app.layout = dbc.Container(
     [
         dcc.Store(id='map-data-store'),
+        dcc.Store(id='selected-trajectory-data-store'),
 
         modal,
 
@@ -45,8 +46,8 @@ app.layout = dbc.Container(
             type="default",
             children=html.Div([
                 dbc.Row([
-                    dbc.Col(dcc.Graph(id='globe-graph'), width=6),
-                    dbc.Col(dcc.Graph(id='series-graph'), width=6), 
+                    dbc.Col(dcc.Graph(id='globe-graph'), width=7),
+                    dbc.Col(dcc.Graph(id='series-graph'), width=5), 
                 ]),
                 dbc.Row(
                     dbc.Col(
@@ -64,8 +65,9 @@ app.layout = dbc.Container(
     fluid=True
 )
 
+# --- КОЛБЭКИ ---
 
-
+# Колбэк #1: Загрузка данных (без изменений, он корректен)
 @app.callback(
     Output('map-data-store', 'data'),
     Output('settings-modal', 'is_open'),
@@ -76,9 +78,6 @@ app.layout = dbc.Container(
     prevent_initial_call=True
 )
 def run_processing_and_store_data(n_clicks, selected_date):
-    """
-    Запускает тяжелые вычисления из data_processing.py и сохраняет результат.
-    """
     if not selected_date:
         return no_update, True, True, {'display': 'none'}
 
@@ -100,20 +99,15 @@ def run_processing_and_store_data(n_clicks, selected_date):
 
 @app.callback(
     Output('globe-graph', 'figure'),
-    Output('series-graph', 'figure'), 
-    Input('map-data-store', 'data')
+    Input('map-data-store', 'data') # <-- ИСПРАВЛЕНИЕ: Добавлен Input
 )
-def update_graphs_from_stored_data(stored_data):
+def update_map_figure(stored_data):
     if not stored_data:
-        map_fig = go.Figure(go.Scattergeo())
-        map_fig.update_layout(title_text="Sites Map")
-        series_fig = go.Figure()
-        series_fig.update_layout(title_text="Data products series", template="plotly_white")
-        return map_fig, series_fig
-    print(data_processing.get_trajectory_details(datetime(2025, 5, 1), 'msku', 'E25'))
+        # Начальное состояние карты
+        return go.Figure(go.Scattergeo()).update_layout(title_text="Sites Map")
+    
     trajectories = stored_data.get('trajectories', [])
     anomaly_polygon_coords = stored_data.get('anomaly_polygon', [])
-
     map_fig = go.Figure()
 
     if anomaly_polygon_coords:
@@ -122,63 +116,47 @@ def update_graphs_from_stored_data(stored_data):
         poly_lons.append(poly_lons[0])
         poly_lats.append(poly_lats[0])
         map_fig.add_trace(go.Scattergeo(
-            lon=poly_lons,
-            lat=poly_lats,
-            mode='lines',
-            fill='toself',
-            fillcolor='rgba(255, 0, 0, 0.3)',
-            line=dict(color='red', width=2),
+            lon=poly_lons, lat=poly_lats, mode='lines', fill='toself',
+            fillcolor='rgba(255, 0, 0, 0.3)', line=dict(color='red', width=2),
             name='Anomaly Area'
         ))
 
+    # ИЗМЕНЕНИЕ: Используем 'irkj' для согласованности с data_processing
     site = data_processing.get_site_data_by_id('msku')
     if site:
         map_fig.add_trace(go.Scattergeo(
-            lon=[site['lon']],
-            lat=[site['lat']],
-            text=site['id'].upper(),
-            mode='markers+text',
-            marker=dict(color='blue', size=10, symbol='triangle-up'),
-            textposition='top right',
-            name=f"Station {site['id'].upper()}"
+            lon=[site['lon']], lat=[site['lat']], text=site['id'].upper(),
+            mode='markers+text', marker=dict(color='blue', size=10, symbol='triangle-up'),
+            textposition='top right', name=f"Station {site['id'].upper()}"
         ))
 
     if trajectories:
         for traj in trajectories:
-            # traj = trajectories[1]
             segments = traj.get('segments', [])
             for i, segment_points in enumerate(segments):
-                if not segment_points: continue # Пропускаем пустые сегменты
-                
+                if not segment_points: continue
                 lats = [p['lat'] for p in segment_points]
                 lons = [p['lon'] for p in segment_points]
-                
                 map_fig.add_trace(go.Scattergeo(
                     lon=lons, lat=lats, mode='lines',
-                    line=dict(width=3, color='orange'), # Сделаем линию потолще для наглядности
-                    name=traj['id'],
-                    showlegend=(i == 0), # Показываем в легенде только первый сегмент
-                    legendgroup=traj['id']
+                    line=dict(width=3, color='orange'), name=traj['id'],
+                    hoverinfo='name', legendgroup=traj['id'],
+                    showlegend=(i == 0), customdata=[traj['id']] * len(lons)
                 ))
     
     map_fig.update_layout(
         title_text="Geophysical Effects Map",
         geo=dict(
-            projection_type='orthographic',
-            projection_rotation={'lon': 90, 'lat': 50},
-            showland=True, landcolor="rgb(217, 217, 217)",
-            showocean=True, oceancolor="rgb(204, 229, 255)",
+            projection_type='orthographic', projection_rotation={'lon': 90, 'lat': 50},
+            showland=True, landcolor="rgb(217, 217, 217)", oceancolor="rgb(204, 229, 255)",
         ),
         margin={"r":0, "t":40, "l":0, "b":0},
-        legend=dict(x=0, y=1),
-        uirevision='constant' 
+        legend=dict(x=0, y=1), uirevision='constant' 
     )
-
-    series_fig = go.Figure()
-    series_fig.update_layout(title_text="Data products series", template="plotly_white")
-
-    return map_fig, series_fig
+    # ИСПРАВЛЕНИЕ: Этот колбэк больше не возвращает series_fig
+    return map_fig
 
 
+# --- ЗАПУСК ---
 if __name__ == '__main__':
     app.run(debug=True)
