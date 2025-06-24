@@ -14,7 +14,7 @@ modal = dbc.Modal(
             dbc.Label("Дата исследования:"),
             dcc.DatePickerSingle(
                 id='date-picker',
-                min_date_allowed=datetime(2020, 1, 1),
+                min_date_allowed=datetime(2025, 5, 1),
                 max_date_allowed=datetime.now(),
                 display_format='YYYY-MM-DD',
                 className="w-100"
@@ -88,7 +88,7 @@ def run_processing_and_store_data(n_clicks, selected_date):
     trajectories = data_processing.get_main_map_data(study_date)
     print(f"Обработка завершена. Найдено подходящих траекторий: {len(trajectories) if trajectories else 0}")
     
-    anomaly_polygon_coords = [(0, 40), (120, 400), (120, 60), (0, 60)]
+    anomaly_polygon_coords = data_processing.generate_equatorial_poly()
 
     data_to_store = {
         'trajectories': trajectories,
@@ -110,7 +110,7 @@ def update_graphs_from_stored_data(stored_data):
         series_fig = go.Figure()
         series_fig.update_layout(title_text="Data products series", template="plotly_white")
         return map_fig, series_fig
-
+    print(data_processing.get_trajectory_details(datetime(2025, 5, 1), 'msku', 'E25'))
     trajectories = stored_data.get('trajectories', [])
     anomaly_polygon_coords = stored_data.get('anomaly_polygon', [])
 
@@ -131,7 +131,7 @@ def update_graphs_from_stored_data(stored_data):
             name='Anomaly Area'
         ))
 
-    site = data_processing.get_site_data_by_id('irkj')
+    site = data_processing.get_site_data_by_id('msku')
     if site:
         map_fig.add_trace(go.Scattergeo(
             lon=[site['lon']],
@@ -145,14 +145,21 @@ def update_graphs_from_stored_data(stored_data):
 
     if trajectories:
         for traj in trajectories:
-            points = traj['points']
-            lats = [p[0] for p in points]
-            lons = [p[1] for p in points]
-            map_fig.add_trace(go.Scattergeo(
-                lon=lons, lat=lats, mode='lines',
-                line=dict(width=2, color='orange'),
-                name=f"Trajectory: {traj['id']}"
-            ))
+            # traj = trajectories[1]
+            segments = traj.get('segments', [])
+            for i, segment_points in enumerate(segments):
+                if not segment_points: continue # Пропускаем пустые сегменты
+                
+                lats = [p['lat'] for p in segment_points]
+                lons = [p['lon'] for p in segment_points]
+                
+                map_fig.add_trace(go.Scattergeo(
+                    lon=lons, lat=lats, mode='lines',
+                    line=dict(width=3, color='orange'), # Сделаем линию потолще для наглядности
+                    name=traj['id'],
+                    showlegend=(i == 0), # Показываем в легенде только первый сегмент
+                    legendgroup=traj['id']
+                ))
     
     map_fig.update_layout(
         title_text="Geophysical Effects Map",
