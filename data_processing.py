@@ -339,79 +339,96 @@ def is_site_near_polygon(
 
     return distance_km <= max_distance_km
 
-
 def get_main_map_data(study_date: datetime):
     """
-    Главная функция, которая сначала фильтрует СТАНЦИИ по близости к аномалии,
-    а затем итерируется по ним.
+    СУПЕР-ОПТИМИЗИРОВАННАЯ ВЕРСИЯ.
+    1. Читает структуру H5, чтобы узнать, какие данные существуют.
+    2. Фильтрует станции по близости к аномалии.
+    3. Вычисляет геометрию ТОЛЬКО для релевантных пар станция-спутник.
     """
-    print(f"Начинаю обработку для ВСЕХ станций за {study_date.date()}")
+    print(f"Начинаю СУПЕР-ОПТИМИЗИРОВАННУЮ обработку за {study_date.date()}")
     
+    # --- Константы для отладки и фильтрации ---
     SEGMENT_LIMIT_FOR_DEBUG = 10 
     DISTANCE_LIMIT_KM = 3000.0 
 
-    all_valid_segments_for_all_sats = []
-    
+    # --- Шаг 1: Загрузка H5 файла (без чтения данных в память) ---
     try:
-        h5_file = load_h5_data(study_date)
-        if not h5_file:
-            print("Крит. ошибка: не удалось загрузить H5 файл.")
-            return [], study_date
-        all_series_data = retrieve_series_data(h5_file)
-        if not all_series_data:
-            print("Крит. ошибка: не удалось прочитать данные из H5 файла.")
-            return [], study_date
+        h5_file_path = load_h5_data(study_date)
+        if not h5_file_path:
+            raise FileNotFoundError("Крит. ошибка: не удалось загрузить H5 файл.")
     except Exception as e:
-        print(f"Крит. ошибка при работе с H5 файлом: {e}")
+        print(f"Ошибка на этапе загрузки H5: {e}")
         return [], study_date
 
-    nav_file = load_nav_file(study_date)
-    end_time = study_date + timedelta(days=1, seconds=-30)
+    # --- Шаг 2: Чтение структуры H5 и фильтрация станций ---
+    print("Чтение структуры H5 файла и фильтрация станций...")
+    relevant_station_sat_pairs = []
+    poly_center_latlon = (0, 0) # Центр для экваториальной аномалии
 
+    with h5py.File(h5_file_path, 'r') as f:
+        all_stations_in_h5 = list(f.keys())
+        print(f"Найдено станций в H5: {len(all_stations_in_h5)}. Фильтрую по расстоянию...")
+
+        for station_id in all_stations_in_h5:
+            site_data = get_site_data_by_id(station_id)
+            if not site_data: continue
+
+            # Фильтруем станции по географической близости
+            if is_site_near_polygon(
+                site_latlon=(site_data['lat'], site_data['lon']),
+                polygon_center_latlon=poly_center_latlon,
+                max_distance_km=DISTANCE_LIMIT_KM
+            ):
+                # Для прошедших фильтр станций, сохраняем список их спутников
+                available_sats = list(f[station_id].keys())
+                relevant_station_sat_pairs.append({
+                    'site_data': site_data,
+                    'sats': available_sats
+                })
+    
+    print(f"После фильтрации осталось {len(relevant_station_sat_pairs)} релевантных станций.")
+    if not relevant_station_sat_pairs:
+        return [], study_date
+
+    # --- Шаг 3: Подготовка к геометрическим расчетам ---
+    try:
+        nav_file = load_nav_file(study_date)
+        if not nav_file: raise FileNotFoundError("Не удалось загрузить NAV файл.")
+        end_time = study_date + timedelta(days=1, seconds=-30)
+        
+        # Собираем УНИКАЛЬНЫЙ список всех спутников, для которых нужно посчитать XYZ
+        all_sats_needed = set()
+        for pair in relevant_station_sat_pairs:
+            all_sats_needed.update(pair['sats'])
+        
+        print(f"Требуется рассчитать XYZ для {len(all_sats_needed)} уникальных спутников.")
+        all_sats_xyz, times = get_sat_xyz(nav_file, study_date, end_time, sats=list(all_sats_needed))
+
+    except Exception as e:
+        print(f"Крит. ошибка при подготовке к гео-расчетам: {e}")
+        return [], study_date
+
+    # --- Шаг 4: Вычисление геометрии ТОЛЬКО для нужных данных ---
+    all_valid_segments = []
     anomaly_polygon_s2 = s2.S2Polygon(s2.S2Loop([
         p.ToPoint() for p in [s2.S2LatLng.FromDegrees(lat, lon) for lon, lat in generate_equatorial_poly()]
     ]))
-    poly_center_latlon = (0, 0)
 
-    available_stations = list(all_series_data.keys())
-    print(f"Всего найдено станций в H5 файле: {len(available_stations)}.")
-    print(f"Начинаю фильтрацию станций по расстоянию до экваториальной аномалии (< {DISTANCE_LIMIT_KM} км)...")
-
-    for i, station_id in enumerate(available_stations):
-        # Проверка лимита перед обработкой новой станции
-        if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments_for_all_sats) >= SEGMENT_LIMIT_FOR_DEBUG:
-            print(f"Достигнут лимит в {SEGMENT_LIMIT_FOR_DEBUG} сегментов. Завершаю поиск.")
-            break
-
-        site_data = get_site_data_by_id(station_id)
-        if not site_data:
-            # Пропускаем, если нет данных о станции
-            continue
-
-        if not is_site_near_polygon(
-            site_latlon=(site_data['lat'], site_data['lon']),
-            polygon_center_latlon=poly_center_latlon,
-            max_distance_km=DISTANCE_LIMIT_KM
-        ):
-            continue
+    for pair in relevant_station_sat_pairs:
+        if len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG: break
         
-        print(f"\n--- Обработка станции {i+1}/{len(available_stations)}: {station_id.upper()} (прошла фильтр) ---")
-        
-        available_sats_for_station = list(all_series_data.get(station_id, {}).keys())
-        if not available_sats_for_station:
-            print(f"    -> Пропуск: нет спутников для станции {station_id}")
-            continue
-        
-        print(f"    Расчет XYZ для {len(available_sats_for_station)} спутников...")
-        all_sats_xyz, times = get_sat_xyz(nav_file, study_date, end_time, sats=available_sats_for_station)
-        if not all_sats_xyz:
-            print(f"    -> Пропуск: не удалось рассчитать XYZ для спутников станции {station_id}")
-            continue
+        site_data = pair['site_data']
+        print(f"\n--- Обработка станции {site_data['id'].upper()} ---")
 
-        sats_elaz = get_elaz_for_site(site_data['xyz'], all_sats_xyz)
+        # Создаем словарь XYZ только для спутников этой станции
+        sats_xyz_for_site = {sat: all_sats_xyz[sat] for sat in pair['sats'] if sat in all_sats_xyz}
+        if not sats_xyz_for_site: continue
+        
+        sats_elaz = get_elaz_for_site(site_data['xyz'], sats_xyz_for_site)
         
         for sat_id, elaz_data in sats_elaz.items():
-            if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments_for_all_sats) >= SEGMENT_LIMIT_FOR_DEBUG:
+            if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
                 break
 
             visible_mask = elaz_data[:, 0] > 0
@@ -429,7 +446,7 @@ def get_main_map_data(study_date: datetime):
                     print(f"        ✅ Сегмент {part_number} для {site_data['id']}-{sat_id} прошел проверку.")
                     segment_for_json = [{**p, 'time': p['time'].isoformat()} for p in segment]
                     intersections_for_json = [{**p, 'time': p['time'].isoformat()} for p in intersections]
-                    all_valid_segments_for_all_sats.append({
+                    all_valid_segments.append({
                         'id': f"{site_data['id']}-{sat_id} ({part_number})",
                         'station_id': site_data['id'],
                         'satellite_id': sat_id,
@@ -438,17 +455,19 @@ def get_main_map_data(study_date: datetime):
                     })
                     part_number += 1
                 
-                if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments_for_all_sats) >= SEGMENT_LIMIT_FOR_DEBUG:
+                if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
                     break
             
-            if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments_for_all_sats) >= SEGMENT_LIMIT_FOR_DEBUG:
+            if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
                 break
         
-        if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments_for_all_sats) >= SEGMENT_LIMIT_FOR_DEBUG:
+        if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
             break
 
-    print(f"\nОбработка завершена. Всего найдено валидных сегментов: {len(all_valid_segments_for_all_sats)}")
-    return all_valid_segments_for_all_sats, study_date
+    print(f"\nОбработка завершена. Всего найдено валидных сегментов: {len(all_valid_segments)}")
+    return all_valid_segments, study_date
+
+
 
 
 
@@ -571,48 +590,47 @@ def get_series_data_for_trajectory(
     product: DataProducts = DataProducts.roti
 ):
     """
-    Получает ВСЕ данные временного ряда для указанной пары станция-спутник за сутки.
-    Фильтрация по времени сегмента больше не производится.
+    ОПТИМИЗИРОВАННАЯ ВЕРСЯ.
+    Читает из HDF5 файла данные ТОЛЬКО для одной запрошенной траектории.
     """
+    print(f"Ленивый запрос данных для графика: {station_id}-{satellite_id}, продукт: {product.name}")
     try:
+        # Получаем путь к файлу (он будет взят из кэша, если уже скачан)
         h5_file = load_h5_data(study_date)
         if not h5_file:
-            print("Не удалось загрузить H5 файл.")
-            return None
+            raise FileNotFoundError("HDF5 файл для этой даты не найден.")
             
-        all_series_data = retrieve_series_data(h5_file)
-        if not all_series_data:
-            print("Не удалось прочитать данные из H5 файла.")
-            return None
-
-        station_data = all_series_data.get(station_id)
-        if not station_data:
-            print(f"Станция {station_id} не найдена в H5 файле.")
-            return None
+        # Открываем файл для чтения
+        with h5py.File(h5_file, 'r') as f:
+            # Проверяем наличие нужных "папок" (групп) в файле
+            if station_id not in f:
+                raise KeyError(f"Станция {station_id} не найдена в H5 файле.")
+            if satellite_id not in f[station_id]:
+                raise KeyError(f"Спутник {satellite_id} не найден для станции {station_id}.")
             
-        sat_data = station_data.get(satellite_id)
-        if not sat_data:
-            print(f"Спутник {satellite_id} не найден для станции {station_id} в H5 файле.")
-            return None
+            sat_group = f[station_id][satellite_id]
+            
+            if product.value.hdf_name not in sat_group:
+                raise KeyError(f"Продукт {product.name} не найден для траектории.")
 
-        if product not in sat_data:
-            print(f"Продукт {product.name} не найден для {station_id}-{satellite_id}.")
-            return None
+            # --- ВОТ ОНА, МАГИЯ! ---
+            # Читаем ТОЛЬКО нужные нам датасеты
+            timestamps = sat_group[DataProducts.timestamp.value.hdf_name][:]
+            values = sat_group[product.value.hdf_name][:]
 
-        times = sat_data[DataProducts.time]
-        values = sat_data[product]
+        # Обработка и возврат данных
+        times = [datetime.fromtimestamp(t, tz=tz.gettz("UTC")) for t in timestamps]
         
-        if len(times) == 0:
-            print(f"Нет данных временного ряда для {station_id}-{satellite_id}.")
-            return None
-
         return {
-            'time': [t.isoformat() for t in times], # Возвращаем ВСЕ временные метки
-            'value': values.tolist(),              # Возвращаем ВСЕ значения
+            'time': [t.isoformat() for t in times],
+            'value': values.tolist(),
             'product_name': product.value.long_name,
             'product_units': product.value.color_limits.units
         }
 
+    except (KeyError, FileNotFoundError) as e:
+        print(f"  -> Ошибка: {e}")
+        return None
     except Exception as e:
-        print(f"Произошла ошибка при получении данных для графика: {e}")
+        print(f"Произошла непредвиденная ошибка при чтении H5 файла: {e}")
         return None
