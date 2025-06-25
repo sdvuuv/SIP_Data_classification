@@ -580,14 +580,29 @@ use-chardet-on-py3 = ["chardet (>=3.0.2,<6)"]
 
 [[package]]
 name = "retrying"
-version = "1.3.5"
+version = "1.4.0"
 description = "Retrying"
 optional = false
-python-versions = "*"
+python-versions = ">=3.6"
 groups = ["main"]
 files = [
-    {file = "retrying-1.3.5-py3-none-any.whl", hash = "sha256:8b5093743188752de37c5e6b21485d87c0b0762b51947ac66658863643ce1d8d"},
-    {file = "retrying-1.3.5.tar.gz", hash = "sha256:13859d82b786d6d76df33d59a2372623deed45d57028018092dec612c45064d8"},
+    {file = "retrying-1.4.0-py3-none-any.whl", hash = "sha256:6509d829c70271937605bce361c8f76e91f9123d355d14df7dc6972b1518064a"},
+    {file = "retrying-1.4.0.tar.gz", hash = "sha256:efa99c78bf4fbdbe6f0cba4101470fbc684b93d30ca45ffa1288443a9805172f"},
+]
+
+[[package]]
+name = "s2geometry"
+version = "0.9.0"
+description = "Computational geometry and spatial indexing on the sphere"
+optional = false
+python-versions = ">=3.4"
+groups = ["main"]
+files = [
+    {file = "s2geometry-0.9.0-cp35-cp35m-manylinux2010_x86_64.whl", hash = "sha256:ba100731d1639dd8022e61a211bf200ce25044409f6db1dd93fd1ebaab22774b"},
+    {file = "s2geometry-0.9.0-cp36-cp36m-manylinux2010_x86_64.whl", hash = "sha256:fd99d1d6ef8c96a0238c32a7aae06a20c8b6dedc1eeeb33636719f68ec968ee1"},
+    {file = "s2geometry-0.9.0-cp37-cp37m-manylinux2010_x86_64.whl", hash = "sha256:a8001325310f214bbdee380b9695978b2e3b56e0c5e9fc7889a36b53ad877537"},
+    {file = "s2geometry-0.9.0-cp38-cp38-manylinux2010_x86_64.whl", hash = "sha256:59dc034a8e83d4312cd436c594ae45f2c04bc8ae075973df41cf3a3ef2989676"},
+    {file = "s2geometry-0.9.0.tar.gz", hash = "sha256:ae395d8966e2865c4df93ab9e1b712f00b18308d064f64a01bf67fdaf9491e28"},
 ]
 
 [[package]]
@@ -795,4 +810,4 @@ testing = ["coverage[toml]", "zope.event", "zope.testing"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13"
-content-hash = "fa2cb06ef481d45367e4211d891ed8c1e77293b54ebbab876d1c93f17af6cb64"
+content-hash = "e85e5b9bb031f763463425febff4b9e9e2b1849ff2146f8a352bff3e7cdd4759"
