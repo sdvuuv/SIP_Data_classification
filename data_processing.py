@@ -495,8 +495,8 @@ def find_next_valid_segment(study_date: datetime, station_list: list, current_st
                         'id': segment_id,
                         'station_id': site_data['id'],
                         'satellite_id': sat_id,
-                        'entry_time': intersections[0]['time'].isoformat(),
-                        'exit_time': intersections[-1]['time'].isoformat(),
+                        'entry_time': intersections[0]['time'].timestamp(),
+                        'exit_time': intersections[-1]['time'].timestamp(),
                         'has_effect': False 
                     }
                     
