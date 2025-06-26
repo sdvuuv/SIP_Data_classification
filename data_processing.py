@@ -32,7 +32,7 @@ CACHE_DIR.mkdir(exist_ok=True) # Создаем папку для кэша, ес
 
 def cache_segment_data(segment_id: str, segment_data: dict):
     """Сохраняет данные сегмента в отдельный JSON-файл."""
-    # Используем безопасное имя файла
+
     safe_filename = segment_id.replace('/', '_').replace('\\', '_') + ".json"
     file_path = CACHE_DIR / safe_filename
     try:
@@ -53,7 +53,6 @@ def get_segment_from_cache(segment_id: str) -> dict | None:
             print(f"Ошибка при чтении кэша для {segment_id}: {e}")
             return None
     else:
-        # Это важный случай: если файла нет (после перезапуска), мы должны сообщить об этом.
         return None
 
 def clear_geometry_cache():
@@ -171,7 +170,7 @@ def calculate_sips(site_lat, site_lon, elevation, azimuth, ionospheric_height=HE
     return np.concatenate([[np.degrees(lat)], [np.degrees(lon)]]).T
 
 async def fetch_site_data_async(session, site_id: str):
-    """Асинхронно запрашивает данные для ОДНОЙ станции."""
+    """Асинхронно запрашивает данные для одной станции."""
     if site_id in station_cache:
         return station_cache[site_id]
         
@@ -189,7 +188,7 @@ async def fetch_site_data_async(session, site_id: str):
             station_cache[site_id] = station_data
             return station_data
     except Exception as e:
-        # print(f"Ошибка при запросе {site_id}: {e}")
+        print(f"Ошибка при запросе {site_id}: {e}")
         station_cache[site_id] = None
         return None
 
@@ -200,7 +199,6 @@ async def get_all_site_data_concurrently(site_ids: list[str]):
     async with aiohttp.ClientSession() as session:
         tasks = [fetch_site_data_async(session, site_id) for site_id in site_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        # Отфильтровываем None и возможные исключения
         return [res for res in results if res is not None and not isinstance(res, Exception)]
 
 def get_elaz_for_site(site_xyz, sats_xyz):
@@ -214,19 +212,13 @@ def generate_equatorial_poly():
     Генерирует координаты для полигона "экваториальный пояс"
     с правильным порядком обхода вершин (против часовой стрелки).
     """
+    # Для тестирования, при работе на реальном полигоне не нужна
     lat_min, lat_max = -15, 15
     lon_min, lon_max = -180, 180
-    num_segments = 50 # Достаточное количество для гладкости
+    num_segments = 50
 
-    # 1. Движемся по нижней границе слева направо
     bottom_edge = list(zip(np.linspace(lon_min, lon_max, num_segments), [lat_min] * num_segments))
-
-    # 2. Движемся по верхней границе справа налево
     top_edge = list(zip(np.linspace(lon_max, lon_min, num_segments), [lat_max] * num_segments))
-
-    # 3. Соединяем их в один контур против часовой стрелки.
-    # [точки нижней границы] + [точки верхней границы в обратном порядке]
-    # Первая и последняя точки будут совпадать, что хорошо для S2Loop.
     polygon_coords = bottom_edge + top_edge
     
     return polygon_coords
@@ -238,7 +230,7 @@ def is_segment_valid(
     """
     Проверяет, пересекает ли сегмент границу аномалии >= 2 раз.
     Учитывает случай, когда сегмент обрывается внутри зоны.
-    Возвращает (is_valid, список точек пересечения с КООРДИНАТАМИ и ВРЕМЕНЕМ)
+    Возвращает (is_valid, список точек пересечения с координатами и временем)
     """
     if len(segment_points) < 2:
         return False, []
@@ -259,7 +251,6 @@ def is_segment_valid(
             if curr_status != prev_status:
                 crossings_count += 1
                 
-                # Интерполяция времени и координат пересечения
                 prev_time = prev_point_data['time']
                 curr_time = curr_point_data['time']
                 intersection_time = prev_time + (curr_time - prev_time) / 2
@@ -351,37 +342,6 @@ def load_h5_data(study_date: datetime, override: bool = False) -> Path:
     h5_file_cache[filename] = filename
     return filename
 
-def retrieve_series_data(local_file: Path) -> dict:
-    """Читает все данные из HDF5 файла в память. Возвращает словарь."""
-    date_str = local_file.stem
-    if date_str in series_data_cache:
-        print(f"Using cached series data for {date_str}")
-        return series_data_cache[date_str]
-
-    print(f"Reading HDF5 file {local_file} into memory cache...")
-    all_data = {}
-    try:
-        with h5py.File(local_file, 'r') as f:
-            for site_name in f.keys():
-                all_data[site_name] = {}
-                for sat_name in f[site_name].keys():
-                    all_data[site_name][sat_name] = {}
-                    sat_group = f[site_name][sat_name]
-                    
-                    timestamps = sat_group[DataProducts.timestamp.value.hdf_name][:]
-                    times = [datetime.fromtimestamp(t, tz=tz.gettz("UTC")) for t in timestamps]
-                    all_data[site_name][sat_name][DataProducts.time] = np.array(times)
-                    
-                    for dp in [DataProducts.roti, DataProducts.dtec_2_10]:
-                        if dp.value.hdf_name in sat_group:
-                            all_data[site_name][sat_name][dp] = sat_group[dp.value.hdf_name][:]
-    except Exception as e:
-        print(f"Error reading HDF5 file: {e}")
-        series_data_cache[date_str] = None
-        return None
-        
-    series_data_cache[date_str] = all_data
-    return all_data
 
 def is_site_near_polygon(
     site_latlon: tuple[float, float],
@@ -390,17 +350,17 @@ def is_site_near_polygon(
 ) -> bool:
     """
     Проверяет, находится ли станция внутри полигона аномалии или на заданном
-    расстоянии от его БЛИЖАЙШЕЙ ГРАНИЦЫ, используя s2geometry.
+    расстоянии от его ближайшей границы, используя s2geometry.
     """
     # Создаем объект S2LatLng для станции
     site_s2_latlng = s2.S2LatLng.FromDegrees(site_latlon[1], site_latlon[0])
 
-    # 1. Проверяем, не находится ли станция уже внутри полигона.
+    # Проверяем, не находится ли станция уже внутри полигона.
     # Для этого S2LatLng нужно преобразовать в S2Point.
     if anomaly_polygon_s2.Contains(site_s2_latlng.ToPoint()):
         return True
 
-    # 2. Если нет, вычисляем расстояние до полигона.
+    # Если нет, вычисляем расстояние до полигона.
     # Метод Project() находит ближайшую точку на полигоне к нашей станции.
     projected_point_s2 = anomaly_polygon_s2.Project(site_s2_latlng.ToPoint())
     
@@ -418,7 +378,7 @@ def is_site_near_polygon(
 
 def get_filtered_stations(study_date: datetime):
     """
-    БЫСТРАЯ функция для инициализации сессии.
+    Функция для инициализации сессии.
     1. Получает список всех станций из H5 файла.
     2. Асинхронно загружает их координаты.
     3. Фильтрует станции по близости к аномалии.
@@ -461,12 +421,9 @@ def get_filtered_stations(study_date: datetime):
         return []
 
 
-# ==============================================================================
-# НОВАЯ ФУНКЦИЯ №2: find_next_valid_segment
-# ==============================================================================
 def find_next_valid_segment(study_date: datetime, station_list: list, current_station_idx: int, current_sat_idx: int):
     """
-    "Ленивая" поисковая функция. Ищет следующий валидный сегмент,
+    Поисковая функция. Ищет следующий валидный сегмент,
     начиная с указанной позиции в списке станций и спутников.
     Возвращает (метаданные_сегмента, новый_индекс_станции, новый_индекс_спутника) или (None, None, None).
     """
@@ -504,7 +461,7 @@ def find_next_valid_segment(study_date: datetime, station_list: list, current_st
         for j in range(start_sat_idx, len(available_sats)):
             sat_id = available_sats[j]
             
-            # --- ЗАПУСКАЕМ ТЯЖЕЛЫЕ ВЫЧИСЛЕНИЯ ТОЛЬКО ДЛЯ ОДНОЙ ПАРЫ ---
+
             all_sats_xyz, times = get_sat_xyz(nav_file, study_date, end_time, sats=[sat_id])
             if not all_sats_xyz: continue
             
@@ -524,7 +481,6 @@ def find_next_valid_segment(study_date: datetime, station_list: list, current_st
             for segment in time_based_segments:
                 is_valid, intersections = is_segment_valid(segment, anomaly_polygon_s2)
                 if is_valid:
-                    # НАШЛИ!
                     print(f"    ✅ Найден валидный сегмент: {site_data['id']}-{sat_id} (часть {part_number})")
                     segment_id = f"{site_data['id']}-{sat_id}-{part_number}"
                     
@@ -544,12 +500,10 @@ def find_next_valid_segment(study_date: datetime, station_list: list, current_st
                         'has_effect': False 
                     }
                     
-                    # Возвращаем метаданные и НОВЫЕ индексы для СЛЕДУЮЩЕГО поиска
                     return event_metadata, i, j + 1
                 
                 part_number += 1
 
-    # Если мы прошли все циклы и ничего не нашли, значит, разметка закончена.
     print("Поиск завершен. Больше валидных сегментов не найдено.")
     return None, None, None
 
@@ -559,7 +513,7 @@ def get_trajectory_details(
     satellite_id: str
 ):
     """
-    Получает детальные данные (точки со временем) для одной конкретной траектории.
+    Получает точки со временем для одной конкретной траектории.
     """
     print(f"Запрос деталей для траектории: {station_id}-{satellite_id}")
 
@@ -672,10 +626,9 @@ def get_series_data_for_trajectory(
     product: DataProducts = DataProducts.roti
 ):
     """
-    ОПТИМИЗИРОВАННАЯ ВЕРСЯ.
-    Читает из HDF5 файла данные ТОЛЬКО для одной запрошенной траектории.
+    Читает из HDF5 файла данные только для одной запрошенной траектории.
     """
-    print(f"Ленивый запрос данных для графика: {station_id}-{satellite_id}, продукт: {product.name}")
+    print(f"Запрос данных для графика: {station_id}-{satellite_id}, продукт: {product.name}")
     try:
         # Получаем путь к файлу (он будет взят из кэша, если уже скачан)
         h5_file = load_h5_data(study_date)
@@ -695,8 +648,6 @@ def get_series_data_for_trajectory(
             if product.value.hdf_name not in sat_group:
                 raise KeyError(f"Продукт {product.name} не найден для траектории.")
 
-            # --- ВОТ ОНА, МАГИЯ! ---
-            # Читаем ТОЛЬКО нужные нам датасеты
             timestamps = sat_group[DataProducts.timestamp.value.hdf_name][:]
             values = sat_group[product.value.hdf_name][:]
 

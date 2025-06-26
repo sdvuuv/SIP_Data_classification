@@ -39,7 +39,7 @@ modal = dbc.Modal(
 
 app.layout = dbc.Container(
     [
-        # У нас будет одно главное хранилище для состояния всей сессии
+
         dcc.Store(id='session-state-store', storage_type='session'),
         
         modal,
@@ -55,14 +55,13 @@ app.layout = dbc.Container(
                 dbc.Row(
                     dbc.Col(
                         html.Div([
-                            # Добавляем disabled=True, чтобы кнопки были неактивны, пока нет сегмента
                             dbc.Button("Эффект есть", id="yes-button", color="success", className="me-3", disabled=True),
                             dbc.Button("Эффекта нет", id="no-button", color="danger", disabled=True),
                         ], className="d-flex justify-content-center mt-4"),
                         width=12
                     )
                 )
-            ], id="main-content", style={'visibility': 'hidden'}) # Используем visibility вместо display
+            ], id="main-content", style={'visibility': 'hidden'})
         )
     ],
     fluid=True,
@@ -72,17 +71,14 @@ app.layout = dbc.Container(
 @app.callback(
     Output('settings-modal', 'is_open', allow_duplicate=True),
     Output('main-content', 'style', allow_duplicate=True),
-    Input('app-layout', 'children'), # Срабатывает при загрузке layout
+    Input('app-layout', 'children'),
     State('session-state-store', 'data')
 )
 def manage_visibility_on_load(_, session_state):
-    # Если сессия уже существует в браузере и не завершена...
     if session_state and not session_state.get('is_finished', False):
         print("Обнаружена существующая сессия. Показываем интерфейс разметки.")
-        # ...то мы НЕ открываем модальное окно и показываем основной контент.
         return False, {'visibility': 'visible'}
     else:
-        # Иначе (первый запуск или сессия завершена) открываем модальное окно.
         print("Новая сессия. Показываем модальное окно.")
         return True, {'visibility': 'hidden'}
 
@@ -97,25 +93,23 @@ def manage_visibility_on_load(_, session_state):
 def start_new_session(n_clicks, selected_date):
     """
     Запускается по кнопке в модальном окне.
-    1. Получает отфильтрованный список станций (быстро).
+    1. Получает отфильтрованный список станций.
     2. Инициализирует состояние сессии в dcc.Store.
-    3. Не ищет первый сегмент! Это сделают кнопки "Да/Нет".
     """
     if not selected_date:
         return no_update, True, no_update
         
     study_date_dt = datetime.strptime(selected_date.split('T')[0], '%Y-%m-%d')
     
-    # Эта функция должна быть в data_processing.py и работать быстро
     filtered_stations = data_processing.get_filtered_stations(study_date_dt)
     
-    # Инициализируем начальное состояние "конвейера"
+    # Инициализируем начальное состояние
     initial_state = {
         'study_date': study_date_dt.isoformat(),
         'station_list': filtered_stations,
         'current_station_idx': 0,
         'current_sat_idx': 0,
-        'current_segment_data': None, # Пока нет сегмента для отображения
+        'current_segment_data': None, 
         'is_finished': False
     }
     
@@ -132,14 +126,14 @@ def start_new_session(n_clicks, selected_date):
 def process_annotation_and_find_next(yes_clicks, no_clicks, session_state):
     """
     Запускается по кнопкам "Да/Нет".
-    1. Сохраняет разметку для *предыдущего* сегмента (если он был).
-    2. Вызывает find_next_valid_segment для поиска *следующего*.
+    1. Сохраняет разметку для предыдущего сегмента (если он был).
+    2. Вызывает find_next_valid_segment для поиска следующего.
     3. Обновляет состояние сессии в dcc.Store.
     """
     if not session_state:
         return no_update
 
-    # --- Шаг 1: Сохранение разметки для предыдущего сегмента ---
+    # Сохранение разметки для предыдущего сегмента
     if session_state.get('current_segment_data'):
         segment_to_annotate = session_state['current_segment_data']
         ctx = dash.callback_context
@@ -158,7 +152,7 @@ def process_annotation_and_find_next(yes_clicks, no_clicks, session_state):
             f.write(json.dumps(segment_to_annotate) + '\n')
         print(f"Сегмент {segment_to_annotate['id']} сохранен с is_effect={is_effect}")
 
-    # --- Шаг 2: Поиск следующего валидного сегмента ---
+    # Поиск следующего валидного сегмента
     print("\nИщу следующий сегмент...")
     next_segment_metadata, next_station_idx, next_sat_idx = data_processing.find_next_valid_segment(
         study_date=datetime.fromisoformat(session_state['study_date']),
@@ -167,7 +161,7 @@ def process_annotation_and_find_next(yes_clicks, no_clicks, session_state):
         current_sat_idx=session_state['current_sat_idx']
     )
 
-    # --- Шаг 3: Обновление состояния сессии ---
+    # Обновление состояния сессии
     if next_segment_metadata:
         # Найден новый сегмент
         session_state['current_segment_data'] = next_segment_metadata
@@ -175,7 +169,7 @@ def process_annotation_and_find_next(yes_clicks, no_clicks, session_state):
         session_state['current_sat_idx'] = next_sat_idx
         session_state['is_finished'] = False
     else:
-        # Сегменты закончились!
+        # Сегменты закончились
         print("Разметка для данной даты завершена.")
         session_state['is_finished'] = True
         session_state['current_segment_data'] = None
@@ -191,7 +185,7 @@ def process_annotation_and_find_next(yes_clicks, no_clicks, session_state):
 )
 def update_graphs(session_state):
     """
-    Полностью "глупый" колбэк. Просто рисует то, что лежит в session_state.
+    Рисует то, что лежит в session_state.
     """
     if not session_state:
         return no_update, no_update, False, False
@@ -219,10 +213,8 @@ def update_graphs(session_state):
 
     if is_finished:
         map_title = "Маркировка завершена! Выберите новую дату."
-        # Можно очистить и файловый кэш при завершении
-        # data_processing.clear_geometry_cache()
     elif segment_to_display_metadata:
-        # --- Логика отрисовки ОДНОГО сегмента ---
+        # Логика отрисовки одного сегмента
         event_id = segment_to_display_metadata['id']
         
         segment_full_data = get_segment_from_cache(event_id)
