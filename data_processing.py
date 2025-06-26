@@ -13,6 +13,9 @@ from coordinates import satellite_xyz
 from numpy.typing import NDArray
 import s2geometry as s2
 from dateutil import tz
+import asyncio
+import aiohttp
+import json
 
 import h5py
 import os
@@ -22,6 +25,42 @@ from enum import Enum
 
 if not tempdir:
     tempdir = "./"
+
+
+CACHE_DIR = Path("geometry_cache")
+CACHE_DIR.mkdir(exist_ok=True) # Создаем папку для кэша, если ее нет
+
+def cache_segment_data(segment_id: str, segment_data: dict):
+    """Сохраняет данные сегмента в отдельный JSON-файл."""
+    # Используем безопасное имя файла
+    safe_filename = segment_id.replace('/', '_').replace('\\', '_') + ".json"
+    file_path = CACHE_DIR / safe_filename
+    try:
+        with open(file_path, 'w') as f:
+            json.dump(segment_data, f)
+    except Exception as e:
+        print(f"Ошибка при сохранении кэша для {segment_id}: {e}")
+
+def get_segment_from_cache(segment_id: str) -> dict | None:
+    """Читает данные сегмента из JSON-файла."""
+    safe_filename = segment_id.replace('/', '_').replace('\\', '_') + ".json"
+    file_path = CACHE_DIR / safe_filename
+    if file_path.exists():
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Ошибка при чтении кэша для {segment_id}: {e}")
+            return None
+    else:
+        # Это важный случай: если файла нет (после перезапуска), мы должны сообщить об этом.
+        return None
+
+def clear_geometry_cache():
+    """Очищает папку с файлами кэша."""
+    print("Очистка файлового кэша геометрии...")
+    for item in CACHE_DIR.iterdir():
+        item.unlink() # Удаляем файл
 
 
 def load_nav_file(epoch: datetime) -> Path:        
@@ -111,7 +150,7 @@ def xyz_to_el_az(xyz_site, xyz_sat, earth_radius=RE):
 
 def split_trajectory_by_gaps(points_with_time: list[dict]) -> list[list[dict]]:
     if not points_with_time: return []
-    gap_threshold = timedelta(seconds=TIME_STEP_SECONDS * 120)
+    gap_threshold = timedelta(seconds=TIME_STEP_SECONDS * 30)
     all_segments, current_segment = [], [points_with_time[0]]
     for i in range(1, len(points_with_time)):
         time_difference = points_with_time[i]['time'] - points_with_time[i-1]['time']
@@ -131,6 +170,39 @@ def calculate_sips(site_lat, site_lon, elevation, azimuth, ionospheric_height=HE
     lon = np.where(lon < -np.pi, lon + 2 * np.pi, lon)
     return np.concatenate([[np.degrees(lat)], [np.degrees(lon)]]).T
 
+async def fetch_site_data_async(session, site_id: str):
+    """Асинхронно запрашивает данные для ОДНОЙ станции."""
+    if site_id in station_cache:
+        return station_cache[site_id]
+        
+    url = f"https://api.simurg.space/sites/{site_id.lower()}"
+    try:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            simurg_data = await response.json()
+            station_data = {
+                'id': simurg_data['code'],
+                'lat': simurg_data['location']['lat'],
+                'lon': simurg_data['location']['lon'],
+                'xyz': simurg_data['xyz']
+            }
+            station_cache[site_id] = station_data
+            return station_data
+    except Exception as e:
+        # print(f"Ошибка при запросе {site_id}: {e}")
+        station_cache[site_id] = None
+        return None
+
+async def get_all_site_data_concurrently(site_ids: list[str]):
+    """
+    Запускает запросы для всех нужных ID станций параллельно.
+    """
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_site_data_async(session, site_id) for site_id in site_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Отфильтровываем None и возможные исключения
+        return [res for res in results if res is not None and not isinstance(res, Exception)]
+
 def get_elaz_for_site(site_xyz, sats_xyz):
     elaz = {}
     for sat, sat_xyz_data in sats_xyz.items():
@@ -138,12 +210,26 @@ def get_elaz_for_site(site_xyz, sats_xyz):
     return elaz
 
 def generate_equatorial_poly():
-    lat_min, lat_max, lon_min, lon_max, num_segments = -5, 5, -180, 180, 100
-    path1 = list(zip(np.linspace(lon_max, lon_min, num_segments), [lat_min] * num_segments))
-    path2 = [(lon_max, lat_max)]
-    path3 = list(zip(np.linspace(lon_min, lon_max, num_segments), [lat_max] * num_segments))
-    path4 = [(lon_min, lat_min)]
-    return path4 + path3 + path2 + path1
+    """
+    Генерирует координаты для полигона "экваториальный пояс"
+    с правильным порядком обхода вершин (против часовой стрелки).
+    """
+    lat_min, lat_max = -15, 15
+    lon_min, lon_max = -180, 180
+    num_segments = 50 # Достаточное количество для гладкости
+
+    # 1. Движемся по нижней границе слева направо
+    bottom_edge = list(zip(np.linspace(lon_min, lon_max, num_segments), [lat_min] * num_segments))
+
+    # 2. Движемся по верхней границе справа налево
+    top_edge = list(zip(np.linspace(lon_max, lon_min, num_segments), [lat_max] * num_segments))
+
+    # 3. Соединяем их в один контур против часовой стрелки.
+    # [точки нижней границы] + [точки верхней границы в обратном порядке]
+    # Первая и последняя точки будут совпадать, что хорошо для S2Loop.
+    polygon_coords = bottom_edge + top_edge
+    
+    return polygon_coords
 
 def is_segment_valid(
     segment_points: list[dict],
@@ -299,138 +385,133 @@ def retrieve_series_data(local_file: Path) -> dict:
 
 def is_site_near_polygon(
     site_latlon: tuple[float, float],
-    polygon_center_latlon: tuple[float, float],
-    max_distance_km: float = 3000.0  
+    anomaly_polygon_s2: s2.S2Polygon,
+    max_distance_km: float
 ) -> bool:
     """
-    Проверяет, находится ли станция в пределах max_distance_km от центра полигона.
-    Использует расчет по большому кругу (great-circle distance).
+    Проверяет, находится ли станция внутри полигона аномалии или на заданном
+    расстоянии от его БЛИЖАЙШЕЙ ГРАНИЦЫ, используя s2geometry.
     """
-    site_lat, site_lon = site_latlon
-    center_lat, center_lon = polygon_center_latlon
+    # Создаем объект S2LatLng для станции
+    site_s2_latlng = s2.S2LatLng.FromDegrees(site_latlon[1], site_latlon[0])
 
-    # Преобразование градусов в радианы
-    site_lat_rad = math.radians(site_lat)
-    site_lon_rad = math.radians(site_lon)
-    center_lat_rad = math.radians(center_lat)
-    center_lon_rad = math.radians(center_lon)
+    # 1. Проверяем, не находится ли станция уже внутри полигона.
+    # Для этого S2LatLng нужно преобразовать в S2Point.
+    if anomaly_polygon_s2.Contains(site_s2_latlng.ToPoint()):
+        return True
 
-    # Преобразование lat/lon в 3D декартовы единичные векторы
-    site_vec = np.array([
-        math.cos(site_lat_rad) * math.cos(site_lon_rad),
-        math.cos(site_lat_rad) * math.sin(site_lon_rad),
-        math.sin(site_lat_rad)
-    ])
-    center_vec = np.array([
-        math.cos(center_lat_rad) * math.cos(center_lon_rad),
-        math.cos(center_lat_rad) * math.sin(center_lon_rad),
-        math.sin(center_lat_rad)
-    ])
-
-    # Вычисление угла между векторами через скалярное произведение
-    dot_product = np.dot(site_vec, center_vec)
-    # Ограничение значения для избежания ошибок с плавающей точкой
-    dot_product = np.clip(dot_product, -1.0, 1.0)
-    angle_rad = math.acos(dot_product)
-
-    # Расчет расстояния
-    earth_radius_km = RE / 1000.0
-    distance_km = angle_rad * earth_radius_km
-
-    return distance_km <= max_distance_km
-
-def get_main_map_data(study_date: datetime):
-    """
-    СУПЕР-ОПТИМИЗИРОВАННАЯ ВЕРСИЯ.
-    1. Читает структуру H5, чтобы узнать, какие данные существуют.
-    2. Фильтрует станции по близости к аномалии.
-    3. Вычисляет геометрию ТОЛЬКО для релевантных пар станция-спутник.
-    """
-    print(f"Начинаю СУПЕР-ОПТИМИЗИРОВАННУЮ обработку за {study_date.date()}")
+    # 2. Если нет, вычисляем расстояние до полигона.
+    # Метод Project() находит ближайшую точку на полигоне к нашей станции.
+    projected_point_s2 = anomaly_polygon_s2.Project(site_s2_latlng.ToPoint())
     
-    # --- Константы для отладки и фильтрации ---
-    SEGMENT_LIMIT_FOR_DEBUG = 10 
-    DISTANCE_LIMIT_KM = 3000.0 
+    # Создаем S2LatLng из спроецированной точки
+    projected_latlng = s2.S2LatLng(projected_point_s2)
 
-    # --- Шаг 1: Загрузка H5 файла (без чтения данных в память) ---
+    # Метод GetDistance() между двумя S2LatLng возвращает расстояние в виде угла S1Angle.
+    s1_angle_distance = site_s2_latlng.GetDistance(projected_latlng)
+
+    # Конвертируем угол в километры
+    earth_radius_km = RE / 1000.0
+    distance_in_km = s1_angle_distance.radians() * earth_radius_km
+    print(site_latlon,' ', distance_in_km)
+    return distance_in_km <= max_distance_km
+
+def get_filtered_stations(study_date: datetime):
+    """
+    БЫСТРАЯ функция для инициализации сессии.
+    1. Получает список всех станций из H5 файла.
+    2. Асинхронно загружает их координаты.
+    3. Фильтрует станции по близости к аномалии.
+    Возвращает отфильтрованный список словарей с данными о станциях.
+    """
+    print(f"Инициализация сессии для {study_date.date()}. Фильтрация станций...")
+    DISTANCE_LIMIT_KM = 100.0 
+
     try:
         h5_file_path = load_h5_data(study_date)
         if not h5_file_path:
-            raise FileNotFoundError("Крит. ошибка: не удалось загрузить H5 файл.")
-    except Exception as e:
-        print(f"Ошибка на этапе загрузки H5: {e}")
-        return [], study_date
+            raise FileNotFoundError("Не удалось загрузить H5 файл для получения списка станций.")
+        
+        with h5py.File(h5_file_path, 'r') as f:
+            all_stations_in_h5 = list(f.keys())
+        
+        print(f"Найдено станций в H5: {len(all_stations_in_h5)}. Загружаю координаты...")
+        all_stations_data = asyncio.run(get_all_site_data_concurrently(all_stations_in_h5))
+        
+        anomaly_poly_coords = generate_equatorial_poly()
+        anomaly_s2_loop = s2.S2Loop([
+            s2.S2LatLng.FromDegrees(lat, lon).ToPoint() for lat, lon in anomaly_poly_coords
+        ])
+        anomaly_polygon_s2 = s2.S2Polygon(anomaly_s2_loop)
 
-    # --- Шаг 2: Чтение структуры H5 и фильтрация станций ---
-    print("Чтение структуры H5 файла и фильтрация станций...")
-    relevant_station_sat_pairs = []
-    poly_center_latlon = (0, 0) # Центр для экваториальной аномалии
-
-    with h5py.File(h5_file_path, 'r') as f:
-        all_stations_in_h5 = list(f.keys())
-        print(f"Найдено станций в H5: {len(all_stations_in_h5)}. Фильтрую по расстоянию...")
-
-        for station_id in all_stations_in_h5:
-            site_data = get_site_data_by_id(station_id)
-            if not site_data: continue
-
-            # Фильтруем станции по географической близости
+        relevant_stations = []
+        for site_data in all_stations_data:
             if is_site_near_polygon(
                 site_latlon=(site_data['lat'], site_data['lon']),
-                polygon_center_latlon=poly_center_latlon,
+                anomaly_polygon_s2=anomaly_polygon_s2,
                 max_distance_km=DISTANCE_LIMIT_KM
             ):
-                # Для прошедших фильтр станций, сохраняем список их спутников
-                available_sats = list(f[station_id].keys())
-                relevant_station_sat_pairs.append({
-                    'site_data': site_data,
-                    'sats': available_sats
-                })
-    
-    print(f"После фильтрации осталось {len(relevant_station_sat_pairs)} релевантных станций.")
-    if not relevant_station_sat_pairs:
-        return [], study_date
-
-    # --- Шаг 3: Подготовка к геометрическим расчетам ---
-    try:
-        nav_file = load_nav_file(study_date)
-        if not nav_file: raise FileNotFoundError("Не удалось загрузить NAV файл.")
-        end_time = study_date + timedelta(days=1, seconds=-30)
+                relevant_stations.append(site_data)
         
-        # Собираем УНИКАЛЬНЫЙ список всех спутников, для которых нужно посчитать XYZ
-        all_sats_needed = set()
-        for pair in relevant_station_sat_pairs:
-            all_sats_needed.update(pair['sats'])
-        
-        print(f"Требуется рассчитать XYZ для {len(all_sats_needed)} уникальных спутников.")
-        all_sats_xyz, times = get_sat_xyz(nav_file, study_date, end_time, sats=list(all_sats_needed))
+        print(f"После фильтрации осталось {len(relevant_stations)} станций.")
+        return relevant_stations
 
     except Exception as e:
-        print(f"Крит. ошибка при подготовке к гео-расчетам: {e}")
-        return [], study_date
+        print(f"Критическая ошибка при фильтрации станций: {e}")
+        return []
 
-    # --- Шаг 4: Вычисление геометрии ТОЛЬКО для нужных данных ---
-    all_valid_segments = []
-    anomaly_polygon_s2 = s2.S2Polygon(s2.S2Loop([
-        p.ToPoint() for p in [s2.S2LatLng.FromDegrees(lat, lon) for lon, lat in generate_equatorial_poly()]
-    ]))
 
-    for pair in relevant_station_sat_pairs:
-        if len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG: break
+# ==============================================================================
+# НОВАЯ ФУНКЦИЯ №2: find_next_valid_segment
+# ==============================================================================
+def find_next_valid_segment(study_date: datetime, station_list: list, current_station_idx: int, current_sat_idx: int):
+    """
+    "Ленивая" поисковая функция. Ищет следующий валидный сегмент,
+    начиная с указанной позиции в списке станций и спутников.
+    Возвращает (метаданные_сегмента, новый_индекс_станции, новый_индекс_спутника) или (None, None, None).
+    """
+    print(f"\nПоиск следующего сегмента, начиная со станции #{current_station_idx}, спутника #{current_sat_idx}...")
+    
+    try:
+        nav_file = load_nav_file(study_date)
+        if not nav_file: raise FileNotFoundError("Не удалось загрузить NAV файл для поиска сегмента.")
+        h5_file_path = load_h5_data(study_date)
+        if not h5_file_path: raise FileNotFoundError("Не удалось загрузить H5 файл для поиска сегмента.")
         
-        site_data = pair['site_data']
-        print(f"\n--- Обработка станции {site_data['id'].upper()} ---")
+        end_time = study_date + timedelta(days=1, seconds=-30)
+        anomaly_poly_coords = generate_equatorial_poly()
+        anomaly_s2_loop = s2.S2Loop([
+            s2.S2LatLng.FromDegrees(lat, lon).ToPoint() for lon, lat in anomaly_poly_coords
+        ])
+        anomaly_polygon_s2 = s2.S2Polygon(anomaly_s2_loop)
+    except Exception as e:
+        print(f"Ошибка при подготовке к поиску сегмента: {e}")
+        return None, None, None
 
-        # Создаем словарь XYZ только для спутников этой станции
-        sats_xyz_for_site = {sat: all_sats_xyz[sat] for sat in pair['sats'] if sat in all_sats_xyz}
-        if not sats_xyz_for_site: continue
+    # Итерируемся по станциям, начиная с текущей
+    for i in range(current_station_idx, len(station_list)):
+        site_data = station_list[i]
         
-        sats_elaz = get_elaz_for_site(site_data['xyz'], sats_xyz_for_site)
+        with h5py.File(h5_file_path, 'r') as f:
+            available_sats = list(f.get(site_data['id'], {}).keys())
         
-        for sat_id, elaz_data in sats_elaz.items():
-            if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
-                break
+        # Если мы на новой станции, начинаем с первого спутника. Иначе - продолжаем.
+        start_sat_idx = current_sat_idx if i == current_station_idx else 0
+        
+        print(f"--- Проверка станции {site_data['id'].upper()} (спутники с #{start_sat_idx}) ---")
 
+        # Итерируемся по спутникам этой станции
+        for j in range(start_sat_idx, len(available_sats)):
+            sat_id = available_sats[j]
+            
+            # --- ЗАПУСКАЕМ ТЯЖЕЛЫЕ ВЫЧИСЛЕНИЯ ТОЛЬКО ДЛЯ ОДНОЙ ПАРЫ ---
+            all_sats_xyz, times = get_sat_xyz(nav_file, study_date, end_time, sats=[sat_id])
+            if not all_sats_xyz: continue
+            
+            sats_elaz = get_elaz_for_site(site_data['xyz'], all_sats_xyz)
+            if sat_id not in sats_elaz: continue
+            
+            elaz_data = sats_elaz[sat_id]
             visible_mask = elaz_data[:, 0] > 0
             if not np.any(visible_mask): continue
             
@@ -443,33 +524,34 @@ def get_main_map_data(study_date: datetime):
             for segment in time_based_segments:
                 is_valid, intersections = is_segment_valid(segment, anomaly_polygon_s2)
                 if is_valid:
-                    print(f"        ✅ Сегмент {part_number} для {site_data['id']}-{sat_id} прошел проверку.")
-                    segment_for_json = [{**p, 'time': p['time'].isoformat()} for p in segment]
-                    intersections_for_json = [{**p, 'time': p['time'].isoformat()} for p in intersections]
-                    all_valid_segments.append({
-                        'id': f"{site_data['id']}-{sat_id} ({part_number})",
+                    # НАШЛИ!
+                    print(f"    ✅ Найден валидный сегмент: {site_data['id']}-{sat_id} (часть {part_number})")
+                    segment_id = f"{site_data['id']}-{sat_id}-{part_number}"
+                    
+                    full_segment_data = {
+                        'id': segment_id,
+                        'points': [{**p, 'time': p['time'].isoformat()} for p in segment],
+                        'intersections': [{**p, 'time': p['time'].isoformat()} for p in intersections]
+                    }
+                    cache_segment_data(segment_id, full_segment_data)
+                    
+                    event_metadata = {
+                        'id': segment_id,
                         'station_id': site_data['id'],
                         'satellite_id': sat_id,
-                        'points': segment_for_json, 
-                        'intersections': intersections_for_json,
-                    })
-                    part_number += 1
+                        'entry_time': intersections[0]['time'].isoformat(),
+                        'exit_time': intersections[-1]['time'].isoformat(),
+                        'has_effect': False 
+                    }
+                    
+                    # Возвращаем метаданные и НОВЫЕ индексы для СЛЕДУЮЩЕГО поиска
+                    return event_metadata, i, j + 1
                 
-                if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
-                    break
-            
-            if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
-                break
-        
-        if SEGMENT_LIMIT_FOR_DEBUG is not None and len(all_valid_segments) >= SEGMENT_LIMIT_FOR_DEBUG:
-            break
+                part_number += 1
 
-    print(f"\nОбработка завершена. Всего найдено валидных сегментов: {len(all_valid_segments)}")
-    return all_valid_segments, study_date
-
-
-
-
+    # Если мы прошли все циклы и ничего не нашли, значит, разметка закончена.
+    print("Поиск завершен. Больше валидных сегментов не найдено.")
+    return None, None, None
 
 def get_trajectory_details(
     study_date: datetime,
